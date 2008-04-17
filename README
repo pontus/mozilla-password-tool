@@ -1,0 +1,47 @@
+Mozilla password tool
+
+pont_mozpass@soua.net
+
+LICENSE
+=======
+Please see the file LICENSE for licensing details.
+
+USAGE
+====
+This tool allows you to view the passwords stored by
+Mozilla/Firefox. It also allows you to encrypt/decrypt the password
+store (so that the master password is required/not required for
+access)
+
+
+INSTALLATION
+============
+If you have pyrex (<URL:http://nz.cosc.canterbury.ac.nz/~greg/python/Pyrex/>) 
+installed, you should use distutils to install, just do
+
+python setup.py install
+
+and you should be all set (although you may of course need to modify
+sys.path if you use --prefix to install to a non-standard place).
+
+If you do not have pyrex, things become a little more complicated, I
+supply the source created by pyrex, and it should be possible to
+compile manually (most likely by running
+
+gcc -pthread -fno-strict-aliasing -O3 -fPIC -IPYTHONPATH -shared -lnss3 -o nss.so nss.c
+
+where PYTHONPATH is probably /usr/include/python2.3 or similar). After
+that, you have to copy the extension to your site-packages directory and
+copy mozpass to where you want it manually.
+
+BUGS
+====
+Bugs can be reported to pont_mozpass_bugs@soua.net.
+
+For reasons of simplicity, I use a hand-hacked header file instead of
+requiring the installation of NSS headers. As the supplied file is
+overly simplistic, it does place an additional requirement on the ABI
+used (who is responsible for adjusting the stack if parameters are
+passed on the stack). I haven't seen a system where that becomes a
+problem, though.
+

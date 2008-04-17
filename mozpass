@@ -1,0 +1,359 @@
+#!/usr/bin/env python
+
+# Mozilla Password Tool
+#
+# By Pontus Freyhult, pont_mozpass@soua.net
+# see file LICENSE for copyright details.
+#
+
+import base64
+import binascii
+import sys
+import getpass
+import glob
+import os
+import string
+import operator
+
+commands = ('list', 'decrypt', 'encrypt')
+filecommands = ('merge', 'dump')
+
+if not (len(sys.argv) == 2 or (
+    len(sys.argv) == 3 and
+    sys.argv[2].lower() in commands) or (
+    len(sys.argv) == 4 and
+    sys.argv[2].lower() in filecommands)) :
+    print ("""Usage: %s PROFILEDIR [COMMAND] [FILE]
+   
+Where PROFILEDIR is your profile directory.
+
+COMMAND, if supplied, should be one of 'list', 'decrypt', 'dump',
+'merge' and 'encrypt' and will list, decrypt, dump (for use with
+merge) and merge encrypt the contents of the password file
+respectively. 
+
+The 'dump' and 'merge' operations both need a filename where dump
+will output the current password file. Merge will use the file as
+source for the merge operations. Duplicated entries will be handled
+by merge.
+
+For the decrypt, encrypt and merge operations, Mozilla/Firefox
+should not be running."""
+    % sys.argv[0])
+    raise SystemExit
+
+command = 'list'
+
+if len(sys.argv) == 3 or len(sys.argv) == 4 and sys.argv[2].lower() in filecommands:
+    command = sys.argv[2].lower()
+
+masterpass = ''
+
+def read_masterpass(type='',url='',tobe=''):
+    global masterpass
+
+    prompt = "Encrypted information - need master password: "
+    if url and type:
+        prompt = "%s for <URL:%s> is %sencrypted - need master password: " % (type,url,tobe)
+
+    masterpass = getpass.getpass(prompt)
+    
+    
+def decrypt(s,type='',url=''):
+    import nss
+    try:
+        raw = base64.decodestring(s)
+    except binascii.Error:
+        return Out_of_sync()
+
+    while 1:
+        try:
+            password = nss.decrypt_pass(profiledir,masterpass,raw)
+            return password
+        except nss.NSSBadPassword:
+            if not masterpass:
+                read_masterpass(type,url)
+            else:
+                print "Wrong password"
+                read_masterpass(type,url)
+
+            if not masterpass:
+                print "No master password, skipping."
+                return "UNKNOWN"
+
+
+def encrypt(s,type='',url=''):
+    import nss
+    
+    while 1:
+        try:                
+            password = nss.encrypt_pass(profiledir,masterpass,s)
+            return base64.encodestring(password)
+        
+        except nss.NSSBadPassword:
+            if not masterpass:
+                read_masterpass(type,url,'to be ')
+            else:
+                print "Wrong password"
+                read_masterpass(type,url,'to be ')
+
+            if not masterpass:
+                print "No master password, skipping."
+                return "UNKNOWN"
+
+
+class Malformed_entry(Exception):
+    pass
+
+class End_of_file(Exception):
+    pass
+
+class Out_of_sync(Exception):
+    pass
+
+def read_field(f):
+    ret = {}
+
+    url = f.readline().strip()
+    if not url:
+        raise End_of_file
+
+    ret['url'] = url
+
+    ret['data'] = []
+
+    typestrings = ('Username','Password')
+    line = 0
+    
+
+    prompt =  f.readline().strip()
+
+    try:
+        while not prompt == '.':
+
+            answer =  f.readline().strip()
+
+            ret['encrypted'] = 0
+        
+            if answer[0:1] == '~':
+                answer = base64.decodestring( answer[1:] )
+            else:
+                ret['encrypted'] = 1
+                answer = decrypt(answer, type=typestrings[line % 1], url=url)
+
+            ret['data'].append( (prompt,answer) )
+            line = line + 1
+            prompt =  f.readline().strip()        
+    except Out_of_sync:
+        print "WARNING! Malformed entry for %s, skipping!" % ret['url']
+        ret = None
+        
+        while f.readline().strip() != '.':
+            pass
+        
+    return ret
+
+
+
+def write_field(f,field):
+
+    f.write( '%s\n' % field['url'] )
+
+    for (p,a) in field['data']:
+        if field['encrypted']:
+            a = encrypt( a,
+                         type='Username',
+                         url=field['url'])
+        else:
+            a = '~%s' % base64.encodestring(
+                a
+                ) 
+    
+        a = a.translate(notrans, "\n\t ")
+    
+        f.write( p + '\n' )
+        f.write( '%s\n' % a.strip() )
+
+    f.write( '.\n' )
+
+def read_dumped_string(inrest):
+    rest = inrest.strip()
+    r = rest.index(' ')
+    if r == -1:
+        return None
+    l = int(rest[:r])
+    if rest[r+1] != '\'' or rest[r+2+l] != '\'':
+          return None
+    s = rest[r+2:r+2+l]
+    return (s, rest[r+3+l:].strip())
+
+
+profiledir = sys.argv[1]
+sfilename = glob.glob( os.path.join(profiledir, "*.s") )
+
+if len(sfilename) != 1:
+    if os.path.exists( os.path.join( profiledir, "signons.txt" )):
+        sfilename = [os.path.join( profiledir, "signons.txt" )]
+    else:
+        print "Not exactly one .s file in your profile directory, quitting."
+        raise SystemExit
+    
+pfile = open( sfilename[0] )
+
+format = pfile.readline()
+
+if format != '#2c\n':
+    print "Unknown file format, aborting."
+    raise SystemExit
+    
+ignored = []
+line = ''
+
+    
+while line != '.\n':
+    line = pfile.readline()
+    ignored.append( line.strip() )
+
+passes = []
+try:
+    while pfile:
+
+        field = read_field(pfile)
+        if field:
+            passes.append(field)
+except End_of_file:
+    pass
+
+pfile.close()
+
+#
+# So, now we've read the file
+#
+
+if command == 'list':
+    for line in ignored[0:-1]:
+        print "Not storing passwords for %s" % line
+
+    for f in passes:
+        encr = ''
+        if f['encrypted']:
+            encr = ' [ENCRYPTED]'
+
+        passes = []
+        data = None
+
+        for p in map(lambda (x,y): y, f['data']):
+            if data == None:
+                data = p
+            else:
+                passes.append((data, p))
+                data = None
+
+        
+        for (u,p) in passes:
+            print "%s:%s is used for <URL:%s>%s." % (u,
+                                                     p,
+                                                     f['url'],
+                                                     encr
+                                                     )
+
+if command == 'dump':
+    dumpf = open( sys.argv[3], 'w')
+    
+    for line in ignored[0:-1]:
+        dumpf.write("Ignoring: %d '%s'\n" % (len(line),line))
+
+    for f in passes:
+        data = ''
+        for p  in f['data']:
+            data = "%s %d '%s' %d '%s'" % (data,len(p[0]),p[0],len(p[1]),p[1])
+            
+        dumpf.write("%d '%s'%s\n" % (len(f['url']),f['url'],data))
+    dumpf.close()
+
+
+elif command == 'encrypt' or command == 'decrypt':
+
+    notrans = string.maketrans('','')
+    
+    if command == 'encrypt':
+        ende = 'Encrypting'
+        encryptval = 1
+    else:
+        ende = 'Decrypting'
+        encryptval = 0
+
+    print "%s password file, I hope you're not running mozilla/firefox." % ende
+    
+    newpfile = open( sfilename[0]+'.new', 'w' )
+    newpfile.write( '#2c\n' )
+    for p in ignored:
+        newpfile.write( '%s\n' % p )
+
+    for f in passes:
+        f['encrypted'] = encryptval
+        write_field(newpfile, f)
+    newpfile.close()
+
+    os.rename( sfilename[0], sfilename[0]+'.safe' )
+    os.rename( sfilename[0]+'.new', sfilename[0] )     
+    print "Done!"
+
+
+elif command == 'merge':
+
+    notrans = string.maketrans('','')
+    
+    print "Merging current password file with dumped file, I hope you're not running"
+    print "mozilla/firefox."
+
+    encryptval = reduce(operator.or_, map(lambda x: x['encrypted'], passes))
+
+    mf = open(sys.argv[3])
+    for l in mf.readlines():
+        p = l.rstrip()
+        if p[0:10] == 'Ignoring: ':
+            ign = read_dumped_string(p[10:])[0]                                  
+            if not ign in ignored:
+                ignored.insert(0,ign)
+        else:
+            r = read_dumped_string(p)
+            if r:
+                url = r[0]
+                data = []
+                while r[1]:
+                    r = read_dumped_string(r[1])
+                    q = r[0]
+                    r = read_dumped_string(r[1])
+                    a = r[0]
+                    
+                    data.append((q,a))
+
+            newdata = 1
+            for r in passes:
+                if url == r['url']:
+                    if data == r['data']:
+                        newdata = 0
+                        
+                        
+            if newdata:
+                f = {'url':url,'data':data}
+                passes.append(f)
+        
+    mf.close()
+    
+    newpfile = open( sfilename[0]+'.new', 'w' )
+    newpfile.write( '#2c\n' )
+    for p in ignored:
+        newpfile.write( '%s\n' % p )
+
+    for f in passes:
+        f['encrypted'] = encryptval
+        write_field(newpfile, f)
+    newpfile.close()
+
+    os.rename( sfilename[0], sfilename[0]+'.safe' )
+    os.rename( sfilename[0]+'.new', sfilename[0] )     
+    print "Done!"
+
+    
